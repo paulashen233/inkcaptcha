@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>inkCAPTCHA</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; font-size: 14px; color: #222; background: #f4f4f2; min-height: 100vh; display: flex; align-items: flex-start; justify-content: center; user-select: none; -webkit-user-select: none; }
+  .wrap { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 7vh 12px 30px; }
+  .card { background: #fff; border: 1px solid #d6d6d2; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+  #gate { width: 304px; padding: 14px 14px; display: flex; align-items: center; gap: 12px; }
+  #box { width: 28px; height: 28px; border: 2px solid #b9b9b4; border-radius: 3px; background: #fff; cursor: pointer; flex: none; display: flex; align-items: center; justify-content: center; }
+  #box.spin { border-color: #888; border-top-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; cursor: default; }
+  #box.done { border-color: #2e7d32; }
+  #box.done::after { content: ""; width: 9px; height: 16px; border: solid #2e7d32; border-width: 0 3px 3px 0; transform: rotate(45deg) translate(-1px,-2px); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #gate .lab { flex: 1; font-size: 14px; }
+  #gate .brand { font-size: 9px; color: #999; text-align: center; line-height: 1.3; }
+  #challenge { width: 360px; display: none; }
+  .head { background: #2b2b2b; color: #fff; padding: 18px 18px 16px; border-radius: 3px 3px 0 0; }
+  .head small { display: block; font-size: 13px; opacity: .85; }
+  .head b { display: block; font-size: 26px; font-weight: 700; margin: 2px 0 2px; text-transform: lowercase; }
+  .body { padding: 8px; }
+  #pad { width: 344px; height: 344px; display: block; border: 1px solid #e3e3df; touch-action: none; cursor: crosshair; background: #fff; }
+  #grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+  #grid .tile { position: relative; aspect-ratio: 1; border: 1px solid #e3e3df; cursor: pointer; background: #fff; transition: transform .12s; }
+  #grid .tile canvas { width: 100%; height: 100%; display: block; }
+  #grid .tile.sel { transform: scale(.86); }
+  #grid .tile.sel::after { content: "✓"; position: absolute; left: -6px; top: -6px; width: 22px; height: 22px; border-radius: 50%; background: #2b2b2b; color: #fff; font-size: 13px; display: flex; align-items: center; justify-content: center; }
+  #grid .tile .why { position: absolute; left: 0; right: 0; bottom: 0; font: 10px ui-monospace, Menlo, monospace; background: rgba(255,255,255,.92); padding: 2px 3px; display: none; }
+  #grid.reveal .tile .why { display: block; }
+  #grid .tile.disagree { outline: 2px solid #d84315; outline-offset: 1px; }
+  .foot { display: flex; align-items: center; gap: 8px; padding: 8px 10px 10px; border-top: 1px solid #eee; }
+  .foot .note { flex: 1; font-size: 12px; color: #c62828; min-height: 15px; }
+  .foot .note.ok { color: #2e7d32; }
+  .foot button { font: inherit; font-size: 13px; font-weight: 600; padding: 8px 16px; border-radius: 2px; border: 0; background: #2b2b2b; color: #fff; cursor: pointer; text-transform: uppercase; letter-spacing: .3px; }
+  .foot button.ghost { background: transparent; color: #555; font-weight: 400; text-transform: none; padding: 8px 6px; }
+  #log { width: 360px; font: 11px/1.6 ui-monospace, Menlo, monospace; color: #777; }
+  #log b { color: #333; font-weight: 500; }
+  #done { width: 360px; padding: 18px; display: none; line-height: 1.55; }
+  #done h2 { font-size: 18px; margin: 0 0 8px; }
+  #done .thanks { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; margin: 12px 0; }
+  #done .thanks canvas { width: 100%; border: 1px solid #eee; }
+  #done button { font: inherit; padding: 8px 14px; border: 1px solid #2b2b2b; background: #fff; cursor: pointer; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card" id="gate">
+    <div id="box" role="checkbox" aria-checked="false" tabindex="0"></div>
+    <div class="lab">I am human</div>
+    <div class="brand">ink<br>CAPTCHA</div>
+  </div>
+
+  <div class="card" id="challenge">
+    <div class="head"><small id="hTop"></small><b id="hWord"></b><small id="hSub"></small></div>
+    <div class="body">
+      <canvas id="pad" width="344" height="344"></canvas>
+      <div id="grid"></div>
+    </div>
+    <div class="foot">
+      <button class="ghost" id="clearBtn">Clear</button>
+      <button class="ghost" id="hintBtn">Hint</button>
+      <span class="note" id="note"></span>
+      <button id="verifyBtn">Verify</button>
+    </div>
+  </div>
+
+  <div class="card" id="done"></div>
+  <div id="log"></div>
+</div>
+
+<script>
+// $P recognizer, based on Vatavu, Anthony & Wobbrock (2012), "Gestures as Point Clouds"
+const N = 32, TAU = Math.PI * 2;
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+function resample(points, n) {
+  let total = 0; for (let i = 1; i < points.length; i++) if (points[i].id === points[i - 1].id) total += dist(points[i - 1], points[i]);
+  const I = total / (n - 1); let D = 0; const pts = points.map(p => ({ ...p })), out = [pts[0]];
+  for (let i = 1; i < pts.length; i++) {
+    if (pts[i].id !== pts[i - 1].id) continue;
+    const d = dist(pts[i - 1], pts[i]);
+    if (D + d >= I && d > 0) { const t = (I - D) / d; const q = { x: pts[i - 1].x + t * (pts[i].x - pts[i - 1].x), y: pts[i - 1].y + t * (pts[i].y - pts[i - 1].y), id: pts[i].id }; out.push(q); pts.splice(i, 0, q); D = 0; }
+    else D += d;
+  }
+  while (out.length < n) out.push({ ...pts[pts.length - 1] });
+  return out.slice(0, n);
+}
+function normalize(strokes) {
+  const pts = []; strokes.forEach((s, id) => s.forEach(p => pts.push({ x: p.x, y: p.y, id })));
+  let r = resample(pts, N), a = 1e9, b = 1e9, c = -1e9, d = -1e9;
+  for (const p of r) { a = Math.min(a, p.x); b = Math.min(b, p.y); c = Math.max(c, p.x); d = Math.max(d, p.y); }
+  const s = Math.max(c - a, d - b) || 1; r = r.map(p => ({ x: (p.x - a) / s, y: (p.y - b) / s }));
+  let cx = 0, cy = 0; for (const p of r) { cx += p.x; cy += p.y; } cx /= r.length; cy /= r.length;
+  return r.map(p => ({ x: p.x - cx, y: p.y - cy }));
+}
+function cloud(pts, t, start) { const m = new Array(pts.length).fill(false); let sum = 0, i = start; do { let ix = -1, mn = 1e9; for (let j = 0; j < m.length; j++) if (!m[j]) { const d = dist(pts[i], t[j]); if (d < mn) { mn = d; ix = j; } } m[ix] = true; sum += (1 - ((i - start + pts.length) % pts.length) / pts.length) * mn; i = (i + 1) % pts.length; } while (i !== start); return sum; }
+function greedy(p, t) { const st = Math.floor(Math.sqrt(p.length)); let mn = 1e9; for (let i = 0; i < p.length; i += st) mn = Math.min(mn, cloud(p, t, i), cloud(t, p, i)); return mn; }
+function read(strokes) {
+  const p = normalize(strokes), best = {};
+  for (const t of memory) { const s = Math.max((2 - greedy(p, t.points)) / 2, 0); if (!(t.name in best) || s > best[t.name]) best[t.name] = s; }
+  return Object.entries(best).map(([name, score]) => ({ name, score })).sort((a, b) => b.score - a.score);
+}
+
+// templates
+const P = (x, y) => ({ x, y });
+const L = (...xy) => { const s = []; for (let i = 0; i < xy.length; i += 2) s.push(P(xy[i], xy[i + 1])); return s; };
+const arc = (cx, cy, r, a0, a1, n = 20, ry = r) => { const s = []; for (let i = 0; i <= n; i++) { const a = a0 + (a1 - a0) * i / n; s.push(P(cx + r * Math.cos(a), cy + ry * Math.sin(a))); } return s; };
+const circle = (cx, cy, r) => arc(cx, cy, r, 0, TAU, 20);
+const rect = (x0, y0, x1, y1) => L(x0, y0, x1, y0, x1, y1, x0, y1, x0, y0);
+const CATEGORIES = {
+  car: [L(-62, 12, -62, -8, -32, -10, -16, -32, 24, -32, 40, -10, 62, -8, 62, 12, -62, 12), circle(-34, 14, 12), circle(34, 14, 12)],
+  bus: [rect(-72, -38, 72, 24), rect(-60, -28, -30, -8), rect(-20, -28, 10, -8), rect(20, -28, 50, -8), circle(-42, 26, 11), circle(42, 26, 11)],
+  bicycle: [circle(-36, 16, 22), circle(36, 16, 22), L(-36, 16, -6, -14, 26, -14, 36, 16), L(-6, -14, 2, 16, -36, 16), L(26, -14, 22, -28, 32, -28), L(-12, -22, 2, -22)],
+  'traffic light': [rect(-18, -56, 18, 52), circle(0, -32, 10), circle(0, -2, 10), circle(0, 28, 10), L(0, 52, 0, 82)],
+  'fire hydrant': [arc(0, -22, 20, Math.PI, TAU, 12).concat(L(20, -22, 20, 48, -20, 48, -20, -22)), L(-20, 2, -32, 2, -32, 16, -20, 16), L(20, 2, 32, 2, 32, 16, 20, 16), L(-28, 48, 28, 48), L(0, -42, 0, -50)],
+  crosswalk: [0, 1, 2, 3, 4].map(i => L(-60 + i * 28, -40, -48 + i * 28, -40, -42 + i * 34, 40, -58 + i * 34, 40, -60 + i * 28, -40)),
+  stairs: [L(-60, 50, -60, 26, -30, 26, -30, 2, 0, 2, 0, -22, 30, -22, 30, -46, 60, -46, 60, 50, -60, 50)],
+  'palm tree': [L(-6, 70, -2, 20, 4, -30), L(6, 70, 10, 20, 14, -30), arc(-25, -20, 30, -1.4, -0.3, 8).map(p => P(p.x, p.y - 10)), arc(35, -20, 30, Math.PI + .3, Math.PI + 1.4, 8).map(p => P(p.x, p.y - 10)), L(9, -32, -40, -10), L(9, -32, 55, -8), L(9, -32, 5, -70)],
+  boat: [L(-62, 0, 62, 0, 42, 26, -42, 26, -62, 0), L(0, 0, 0, -64), L(0, -64, 40, -6, 0, -6)],
+  bridge: [L(-80, 0, 80, 0), L(-80, 10, 80, 10), L(-42, 10, -42, -52), L(42, 10, 42, -52), arc(0, -52, 42, Math.PI, 0, 14, 40), L(-80, -10, -42, -52), L(80, -10, 42, -52)],
+  mountain: [L(-75, 40, -25, -32, 0, 0, 28, -20, 75, 40), L(-38, -14, -25, -32, -12, -14)],
+  chimney: [L(-60, 40, -60, -10, 0, -50, 60, -10, 60, 40), rect(22, -48, 38, -20)]
+};
+const NAMES = Object.keys(CATEGORIES);
+let memory = NAMES.map(n => ({ name: n, points: normalize(CATEGORIES[n]), strokes: CATEGORIES[n], origin: 'seed' }));
+let donated = [];
+
+// messy versions of the templates for the grid
+let seed = Date.now() % 100000 + 1; const rnd = () => (seed = seed * 16807 % 2147483647) / 2147483647; const rr = (a, b) => a + (b - a) * rnd();
+function sloppy(strokes, mess) {
+  const sx = rr(1 - .2 * mess, 1 + .2 * mess), sy = rr(1 - .2 * mess, 1 + .2 * mess), a = rr(-.18, .18) * mess;
+  let ss = strokes.filter((s, i) => !(strokes.length > 2 && i > 0 && rnd() < .18 * mess));
+  return ss.map(s => {
+    const q = s.map(p => P((p.x * Math.cos(a) - p.y * Math.sin(a)) * sx, (p.x * Math.sin(a) + p.y * Math.cos(a)) * sy)), out = [];
+    for (let i = 0; i < q.length; i++) { const p0 = q[Math.max(0, i - 1)], p1 = q[i], n = Math.max(1, Math.ceil(dist(p0, p1) / 5)); for (let k = 1; k <= n; k++) out.push(P(p0.x + (p1.x - p0.x) * k / n + rr(-2.5, 2.5) * mess, p0.y + (p1.y - p0.y) * k / n + rr(-2.5, 2.5) * mess)); }
+    return out.length > 1 ? out : q;
+  });
+}
+function hybrid(a, b) { // half of one template + half of another
+  const A = CATEGORIES[a], B = CATEGORIES[b];
+  return sloppy(A.slice(0, Math.ceil(A.length / 2)).concat(B.slice(Math.ceil(B.length / 2))), .8);
+}
+function render(cv, strokes, color = '#222') {
+  const g = cv.getContext('2d'), W = cv.width; g.clearRect(0, 0, W, W);
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9; for (const s of strokes) for (const p of s) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+  const sc = W * .72 / Math.max(x1 - x0, y1 - y0, 1);
+  g.save(); g.translate(W / 2, W / 2); g.scale(sc, sc); g.translate(-(x0 + x1) / 2, -(y0 + y1) / 2);
+  g.lineWidth = 2.6 / sc * (W / 110); g.lineCap = 'round'; g.lineJoin = 'round'; g.strokeStyle = color;
+  for (const s of strokes) { g.beginPath(); s.forEach((p, i) => i ? g.lineTo(p.x, p.y) : g.moveTo(p.x, p.y)); g.stroke(); }
+  g.restore();
+}
+
+// steps
+const $ = id => document.getElementById(id);
+const article = w => w === 'stairs' ? 'some stairs' : (/^[aeiou]/.test(w) ? 'an ' : 'a ') + w;
+const plural = w => w === 'bus' ? 'buses' : w === 'crosswalk' ? 'crosswalks' : w === 'stairs' ? 'stairs' : w === 'fire hydrant' ? 'fire hydrants' : w === 'traffic light' ? 'traffic lights' : w === 'palm tree' ? 'palm trees' : w === 'chimney' ? 'chimneys' : w + 's';
+let stage = 'gate', target = null, passes = 0, attempts = 0, strokeStart = 0, yourDrawings = [];
+function log(html) { $('log').insertAdjacentHTML('afterbegin', `<div>${html}</div>`); }
+function note(t, ok) { $('note').textContent = t; $('note').className = 'note' + (ok ? ' ok' : ''); }
+
+$('box').onclick = () => {
+  if (stage !== 'gate') return;
+  $('box').className = 'spin'; stage = 'thinking';
+  setTimeout(() => { $('challenge').style.display = 'block'; drawChallenge(); }, 900);
+};
+
+// step 1: drawing
+const pad = $('pad'), pg = pad.getContext('2d');
+let strokes = [], cur = null;
+function padPos(e) { const r = pad.getBoundingClientRect(); return P((e.clientX - r.left) * 344 / r.width, (e.clientY - r.top) * 344 / r.height); }
+let hintOn = false;
+function drawHint() {
+  const t = CATEGORIES[target]; let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const s of t) for (const p of s) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+  const sc = 220 / Math.max(x1 - x0, y1 - y0);
+  pg.save(); pg.translate(172, 172); pg.scale(sc, sc); pg.translate(-(x0 + x1) / 2, -(y0 + y1) / 2);
+  pg.strokeStyle = 'rgba(0,0,0,.13)'; pg.lineWidth = 6 / sc; pg.lineCap = 'round'; pg.lineJoin = 'round'; pg.setLineDash([1 / sc, 10 / sc]);
+  for (const s of t) { pg.beginPath(); s.forEach((p, i) => i ? pg.lineTo(p.x, p.y) : pg.moveTo(p.x, p.y)); pg.stroke(); }
+  pg.restore();
+}
+function hintPixels() {
+  const t = CATEGORIES[target]; let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const s of t) for (const p of s) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+  const sc = 220 / Math.max(x1 - x0, y1 - y0), out = [];
+  const tr = p => P(172 + (p.x - (x0 + x1) / 2) * sc, 172 + (p.y - (y0 + y1) / 2) * sc);
+  for (const s of t) for (let i = 1; i < s.length; i++) { const a = tr(s[i - 1]), b = tr(s[i]), n = Math.max(1, Math.ceil(dist(a, b) / 3)); for (let k = 0; k <= n; k++) out.push(P(a.x + (b.x - a.x) * k / n, a.y + (b.y - a.y) * k / n)); }
+  return out;
+}
+function tracedHint() {
+  const H = hintPixels(), D = strokes.flat();
+  const near = (p, set, r) => set.some(q => Math.abs(q.x - p.x) < r && Math.abs(q.y - p.y) < r && dist(p, q) < r);
+  const onHint = D.filter(p => near(p, H, 9)).length / D.length;
+  const covered = H.filter((p, i) => i % 3 === 0 && near(p, D, 12)).length / Math.ceil(H.length / 3);
+  return onHint > .8 && covered > .7;
+}
+function redrawPad() { pg.clearRect(0, 0, 344, 344); if (hintOn) drawHint(); pg.lineWidth = 3; pg.lineCap = 'round'; pg.lineJoin = 'round'; pg.strokeStyle = '#222'; for (const s of strokes.concat(cur ? [cur] : [])) { pg.beginPath(); s.forEach((p, i) => i ? pg.lineTo(p.x, p.y) : pg.moveTo(p.x, p.y)); pg.stroke(); } }
+pad.addEventListener('pointerdown', e => { if (stage !== 'draw') return; pad.setPointerCapture(e.pointerId); if (!strokes.length) strokeStart = performance.now(); cur = [padPos(e)]; note(''); });
+pad.addEventListener('pointermove', e => { if (cur) { cur.push(padPos(e)); redrawPad(); } });
+pad.addEventListener('pointerup', () => { if (!cur) return; if (cur.length < 2) cur.push(P(cur[0].x + 1, cur[0].y + 1)); strokes.push(cur); cur = null; redrawPad(); });
+$('clearBtn').onclick = () => { strokes = []; redrawPad(); note(''); };
+$('hintBtn').onclick = () => {
+  if (stage !== 'draw') return;
+  hintOn = !hintOn; usedHint = usedHint || hintOn; redrawPad();
+  $('hintBtn').textContent = hintOn ? 'Hide hint' : 'Hint';
+  if (hintOn) note('Example shown. Do not trace.', true); else note('');
+};
+let usedHint = false;
+
+function drawChallenge() {
+  stage = 'draw'; strokes = []; hintOn = false; usedHint = false; $('hintBtn').textContent = 'Hint'; $('hintBtn').style.display = '';
+  const pool = NAMES.filter(n => n !== target);
+  target = pool[Math.floor(rnd() * pool.length)];
+  redrawPad();
+  $('hTop').textContent = 'Draw'; $('hWord').textContent = article(target); $('hSub').textContent = passes ? 'One more.' : 'Then click verify.';
+  pad.style.display = 'block'; $('grid').style.display = 'none'; $('clearBtn').style.display = '';
+  $('verifyBtn').textContent = 'Verify'; $('verifyBtn').onclick = verifyDrawing;
+}
+function verifyDrawing() {
+  if (stage !== 'draw') return;
+  if (!strokes.length) return note('Please draw ' + article(target) + '.');
+  attempts++;
+  const ms = performance.now() - strokeStart;
+  const r = read(strokes), mine = r.find(x => x.name === target), top = r[0];
+  const tops = r.slice(0, 3).map(x => `${x.name} ${x.score.toFixed(2)}`).join(' · ');
+  if (ms < 700) { note('Please try again. Drawn too quickly.'); log(`<b>fail</b> ${target}: ${Math.round(ms)} ms`); return; }
+  if (top.name !== target || mine.score < .45) {
+    note(`Please try again. This looks like ${article(top.name)}.`);
+    log(`<b>fail</b> ${target}: read as ${tops}`);
+    return;
+  }
+  if (usedHint && tracedHint()) {
+    note('Please try again. Tracing is not allowed.');
+    log(`<b>fail</b> ${target}: traced the hint`);
+    return;
+  }
+  if (mine.score > .93) {
+    note('Please try again. Too accurate.');
+    log(`<b>fail</b> ${target}: ${mine.score.toFixed(2)}, too accurate`);
+    return;
+  }
+  passes++;
+  yourDrawings.push({ name: target, strokes: strokes.map(s => s.slice()) });
+  log(`<b>pass</b> ${target}: ${mine.score.toFixed(2)}${usedHint ? ' (hint)' : ''}`);
+  note('Verified.', true);
+  setTimeout(() => passes < 2 ? drawChallenge() : gridChallenge(), 700);
+}
+
+// step 2: grid
+let tiles = [];
+function gridChallenge() {
+  stage = 'grid';
+  const t = NAMES[Math.floor(rnd() * NAMES.length)]; target = t;
+  const others = NAMES.filter(n => n !== t);
+  const pick = () => others[Math.floor(rnd() * others.length)];
+  const raw = [];
+  const nT = 3 + Math.floor(rnd() * 2);
+  for (let i = 0; i < nT; i++) raw.push(sloppy(CATEGORIES[t], rr(.4, 1.3)));
+  raw.push(hybrid(t, pick()));
+  const yours = yourDrawings.find(d => d.name !== t) || yourDrawings[0];
+  if (yours) raw.push(yours.strokes); // one of the visitor's own drawings
+  while (raw.length < 9) raw.push(sloppy(CATEGORIES[pick()], rr(.4, 1.2)));
+  for (let i = raw.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [raw[i], raw[j]] = [raw[j], raw[i]]; }
+  tiles = raw.map(s => { const r = read(s); return { strokes: s, reading: r, machineYes: r[0].name === t && r[0].score >= .4, sel: false }; });
+  $('hTop').textContent = 'Select all squares with'; $('hWord').textContent = plural(t); $('hSub').textContent = 'If there are none, click verify.';
+  pad.style.display = 'none'; $('clearBtn').style.display = 'none'; $('hintBtn').style.display = 'none';
+  const g = $('grid'); g.innerHTML = ''; g.className = ''; g.style.display = 'grid';
+  tiles.forEach((tile, i) => {
+    const d = document.createElement('div'); d.className = 'tile';
+    const cv = document.createElement('canvas'); cv.width = cv.height = 220; render(cv, tile.strokes);
+    const why = document.createElement('div'); why.className = 'why'; why.textContent = `${tile.reading[0].name} ${tile.reading[0].score.toFixed(2)}`;
+    d.append(cv, why);
+    d.onclick = () => { if (stage !== 'grid') return; tile.sel = !tile.sel; d.classList.toggle('sel', tile.sel); };
+    g.appendChild(d);
+  });
+  note(''); $('verifyBtn').textContent = 'Verify'; $('verifyBtn').onclick = verifyGrid;
+}
+function verifyGrid() {
+  if (stage !== 'grid') return;
+  stage = 'reveal';
+  const g = $('grid'); g.classList.add('reveal');
+  let disagree = 0;
+  [...g.children].forEach((d, i) => { if (tiles[i].sel !== tiles[i].machineYes) { d.classList.add('disagree'); disagree++; } });
+  // selected squares are saved as new templates
+  tiles.forEach(tile => { if (tile.sel) { memory.push({ name: target, points: normalize(tile.strokes), strokes: tile.strokes, origin: 'you' }); donated.push({ name: target, strokes: tile.strokes }); } });
+  log(`<b>grid</b> ${tiles.filter(x => x.sel).length} selected as ${target}, ${9 - disagree}/9 match`);
+  if (disagree) note(`${disagree} square${disagree > 1 ? 's' : ''} did not match.`);
+  else note('All squares match.', true);
+  $('hSub').textContent = 'Red: squares where your answer and the system\'s reading differ.';
+  $('verifyBtn').textContent = disagree ? 'Submit anyway' : 'Continue';
+  $('verifyBtn').onclick = finish;
+}
+function finish() {
+  stage = 'done';
+  $('challenge').style.display = 'none'; $('box').className = 'done'; $('box').setAttribute('aria-checked', 'true');
+  const d = $('done'); d.style.display = 'block';
+  const learned = memory.filter(m => m.origin === 'you').length;
+  d.innerHTML = `<h2>Verification complete.</h2>
+    <div>Drawings verified: ${passes}. Drawings labelled: ${donated.length}.</div>
+    <div class="thanks"></div>
+    <div style="color:#777;font-size:12px">Your labels have been added to the templates (${memory.length} in total, ${learned} from you). Thank you for your contribution.</div>
+    <div style="margin-top:12px"><button id="againBtn">Verify again</button></div>`;
+  donated.slice(-12).forEach(x => { const cv = document.createElement('canvas'); cv.width = cv.height = 90; render(cv, x.strokes); cv.title = x.name; d.querySelector('.thanks').appendChild(cv); });
+  $('againBtn').onclick = () => { d.style.display = 'none'; $('box').className = ''; passes = 0; stage = 'gate'; $('box').click(); };
+}
+</script>
+</body>
+</html>
